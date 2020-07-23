@@ -85,7 +85,7 @@ func parseContext(args []string) (*Context, error) {
 	flags.BoolVar(&c.Logs, []string{"l", "-logs"}, true, "pipe logs")
 	flags.BoolVar(&c.Notify, []string{"n", "-notify"}, false, "setup systemd notify for container")
 	flags.BoolVar(&c.Env, []string{"e", "-env"}, false, "inherit environment variable")
-	flags.BoolVar(&c.UnifiedHiearchy, []string{"-unifiedHierarchy"}, false, "use the unified cgroupv2 hiearchy at /sys/fs/cgroup/unified")
+	flags.BoolVar(&c.UnifiedHiearchy, []string{"-unified-hierarchy"}, false, "use the unified cgroupv2 hiearchy at /sys/fs/cgroup/unified")
 	flags.Var(&flCgroups, []string{"c", "-cgroups"}, "cgroups to take ownership of or 'all' for all cgroups available")
 
 	err := flags.Parse(args)
