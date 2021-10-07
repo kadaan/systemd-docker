@@ -400,6 +400,10 @@ func moveCgroups(c *Context) (bool, error) {
 			log.Printf("Moving pid %s to %s\n", pid, currentFullPath)
 			err = writePid(pid, currentFullPath)
 			if err != nil {
+				if pidDied(pidInt) {
+					// Ignore if PID died between previous check and cgroup assignment
+					continue
+				}
 				return false, err
 			}
 
