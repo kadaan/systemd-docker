@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"github.com/docker/docker/opts"
+	dockerClient "github.com/fsouza/go-dockerclient"
+	flag "github.com/weaveworks/common/mflag"
 	"io"
 	"io/ioutil"
 	"log"
@@ -13,22 +16,12 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"time"
-
-	"github.com/docker/docker/opts"
-	// flag "github.com/docker/docker/pkg/mflag"
-
-	// "github.com/weaveworks/docker/opts"
-	flag "github.com/weaveworks/common/mflag"
-
-	dockerClient "github.com/fsouza/go-dockerclient"
 )
 
 var (
-	SYSFS       string        = "/sys/fs/cgroup"
-	PROCS       string        = "cgroup.procs"
-	CGROUP_PROC string        = "/proc/%d/cgroup"
-	INTERVAL    time.Duration = 1000
+	CgroupProcs     = "cgroup.procs"
+	SysFsCgroupPath = "/sys/fs/cgroup"
+	ProcCgroupPath  = "/proc/%d/cgroup"
 )
 
 type Context struct {
@@ -38,6 +31,7 @@ type Context struct {
 	UnifiedHiearchy bool
 	Logs            bool
 	Notify          bool
+	Action          string
 	Name            string
 	Env             bool
 	Rm              bool
@@ -49,8 +43,64 @@ type Context struct {
 	Client          *dockerClient.Client
 }
 
+type monitor interface {
+	Close() error
+	Start(conn net.Conn) error
+}
+
+type Monitor struct {
+	context	 *Context
+	client   *dockerClient.Client
+	listener chan *dockerClient.APIEvents
+}
+
+func (m *Monitor) Start(conn net.Conn) error {
+	log.Printf("Starting health check monitor for container %s\n", m.context.Id)
+	defer func(conn net.Conn) {
+		_ = conn.Close()
+	}(conn)
+	ready := false
+	for {
+		select {
+		case ev, ok := <-m.listener:
+			if !ok || ev == nil {
+				return errors.New("event listener closed")
+			}
+			if strings.HasPrefix(ev.Action, "health_status: ") {
+				if ev.Status == "health_status: healthy" {
+					if !ready {
+						if _, err := conn.Write([]byte("READY=1")); err == nil {
+							log.Printf("Signaled to systemd that the container %s is healthy\n", m.context.Id)
+							ready = true
+						} else {
+							fmt.Printf("Failed to signal to systemd that the container %s is healthy: %s\n", m.context.Id, err)
+						}
+					} else {
+						if _, err := conn.Write([]byte("WATCHDOG=1")); err == nil {
+							log.Printf("Signaled to systemd watchdog that the container %s is still healthy\n", m.context.Id)
+						} else {
+							fmt.Printf("Failed to signal to systemd watchdog that the container %s is still healthy: %s\n", m.context.Id, err)
+						}
+					}
+				}
+			} else if ev.Action == "stop" || ev.Action == "kill" || ev.Action == "die" || ev.Action == "oom" {
+				log.Printf("Container %s is exiting, stopping health check monitor\n", m.context.Id)
+				return nil
+			}
+		}
+	}
+}
+
+func (m *Monitor) Close() error {
+	log.Printf("Closing health check monitor for container %s\n", m.context.Id)
+	if err := m.client.RemoveEventListener(m.listener); err != nil {
+		return err
+	}
+	return nil
+}
+
 func setupEnvironment(c *Context) {
-	newArgs := []string{}
+	var newArgs []string
 	if c.Notify && len(c.NotifySocket) > 0 {
 		newArgs = append(newArgs, "-e", fmt.Sprintf("NOTIFY_SOCKET=%s", c.NotifySocket))
 		newArgs = append(newArgs, "-v", fmt.Sprintf("%s:%s", c.NotifySocket, c.NotifySocket))
@@ -97,11 +147,12 @@ func parseContext(args []string) (*Context, error) {
 	var name string
 
 	runArgs := flags.Args()
-	if len(runArgs) == 0 || runArgs[0] != "run" {
+	if len(runArgs) == 0 || (runArgs[0] != "run" && runArgs[0] != "start") {
 		log.Println("Args:", runArgs)
-		return nil, errors.New("run not found in arguments")
+		return nil, errors.New("run/start action not found in arguments")
 	}
 
+	c.Action = runArgs[0]
 	runArgs = runArgs[1:]
 	newArgs := make([]string, 0, len(runArgs))
 
@@ -128,7 +179,7 @@ func parseContext(args []string) (*Context, error) {
 		}
 	}
 
-	if !foundD {
+	if !foundD && c.Action == "run" {
 		newArgs = append([]string{"-d"}, newArgs...)
 	}
 
@@ -156,7 +207,8 @@ func lookupNamedContainer(c *Context) error {
 		return err
 	}
 
-	container, err := client.InspectContainer(c.Name)
+	containerOptions := dockerClient.InspectContainerOptions{ID: c.Name}
+	container, err := client.InspectContainerWithOptions(containerOptions)
 	if _, ok := err.(*dockerClient.NoSuchContainer); ok {
 		return nil
 	}
@@ -180,7 +232,7 @@ func lookupNamedContainer(c *Context) error {
 			return err
 		}
 
-		container, err = client.InspectContainer(c.Name)
+		container, err = client.InspectContainerWithOptions(containerOptions)
 		if err != nil {
 			return err
 		}
@@ -193,8 +245,13 @@ func lookupNamedContainer(c *Context) error {
 }
 
 func launchContainer(c *Context) error {
-	args := append([]string{"run"}, c.Args...)
-	c.Cmd = exec.Command("docker", args...)
+	args := append([]string{c.Action}, c.Args...)
+	dockerCommand := os.Getenv("DOCKER_COMMAND")
+	if len(dockerCommand) == 0 {
+		dockerCommand = "docker"
+	}
+
+	c.Cmd = exec.Command(dockerCommand, args...)
 
 	errorPipe, err := c.Cmd.StderrPipe()
 	if err != nil {
@@ -211,7 +268,9 @@ func launchContainer(c *Context) error {
 		return err
 	}
 
-	go io.Copy(os.Stderr, errorPipe)
+	go func() {
+		_, _ = io.Copy(os.Stderr, errorPipe)
+	}()
 
 	bytes, err := ioutil.ReadAll(outputPipe)
 	if err != nil {
@@ -251,7 +310,7 @@ func runContainer(c *Context) error {
 	}
 
 	if c.Pid == 0 {
-		return errors.New("Failed to launch container, pid is 0")
+		return errors.New("failed to launch container, pid is 0")
 	}
 
 	return nil
@@ -267,7 +326,7 @@ func getClient(c *Context) (*dockerClient.Client, error) {
 		endpoint = "unix:///var/run/docker.sock"
 	}
 
-	return dockerClient.NewVersionedClient(endpoint, "1.20")
+	return dockerClient.NewClient(endpoint)
 }
 
 func getContainerPid(c *Context) (int, error) {
@@ -276,7 +335,7 @@ func getContainerPid(c *Context) (int, error) {
 		return 0, err
 	}
 
-	container, err := client.InspectContainer(c.Id)
+	container, err := client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: c.Id})
 	if err != nil {
 		return 0, err
 	}
@@ -293,7 +352,7 @@ func getContainerPid(c *Context) (int, error) {
 }
 
 func getCgroupsForPid(pid int) (map[string]string, error) {
-	file, err := os.Open(fmt.Sprintf(CGROUP_PROC, pid))
+	file, err := os.Open(fmt.Sprintf(ProcCgroupPath, pid))
 	if err != nil {
 		return nil, err
 	}
@@ -326,11 +385,11 @@ func constructCgroupPath(c *Context, cgroupName string, cgroupPath string) strin
 	if cgroupName == "" && c.UnifiedHiearchy {
 		cgroupName = "unified"
 	}
-	return path.Join(SYSFS, strings.TrimPrefix(cgroupName, "name="), cgroupPath, PROCS)
+	return path.Join(SysFsCgroupPath, strings.TrimPrefix(cgroupName, "name="), cgroupPath, CgroupProcs)
 }
 
 func getCgroupPids(c *Context, cgroupName string, cgroupPath string) ([]string, error) {
-	ret := []string{}
+	var ret []string
 
 	file, err := os.Open(constructCgroupPath(c, cgroupName, cgroupPath))
 	if err != nil {
@@ -431,7 +490,7 @@ func pidDied(pid int) bool {
 
 func notify(c *Context) error {
 	if pidDied(c.Pid) {
-		return errors.New("Container exited before we could notify systemd")
+		return errors.New("container exited before we could notify systemd")
 	}
 
 	if len(c.NotifySocket) == 0 {
@@ -443,19 +502,34 @@ func notify(c *Context) error {
 		return err
 	}
 
-	defer conn.Close()
-
 	_, err = conn.Write([]byte(fmt.Sprintf("MAINPID=%d", c.Pid)))
 	if err != nil {
+		_ = conn.Close()
 		return err
 	}
 
 	if pidDied(c.Pid) {
-		conn.Write([]byte(fmt.Sprintf("MAINPID=%d", os.Getpid())))
-		return errors.New("Container exited before we could notify systemd")
+		_, _ = conn.Write([]byte(fmt.Sprintf("MAINPID=%d", os.Getpid())))
+		_ = conn.Close()
+		return errors.New("container exited before we could notify systemd")
 	}
 
-	if !c.Notify {
+	if c.Notify {
+		m, err := createMonitor(c)
+		if err != nil {
+			return err
+		}
+		go func(m monitor) {
+			defer func(m monitor) {
+				_ = m.Close()
+			}(m)
+			_ = m.Start(conn)
+		}(m)
+	} else {
+		defer func(conn net.Conn) {
+			_ = conn.Close()
+		}(conn)
+
 		_, err = conn.Write([]byte("READY=1"))
 		if err != nil {
 			return err
@@ -463,6 +537,34 @@ func notify(c *Context) error {
 	}
 
 	return nil
+}
+
+func createMonitor(c *Context) (monitor, error) {
+	log.Printf("Creating health check monitor for container %s\n", c.Id)
+
+	client, err := getClient(c)
+	if err != nil {
+		return nil, err
+	}
+
+	listener := make(chan *dockerClient.APIEvents)
+	eventsOptions := dockerClient.EventsOptions{
+		Filters: map[string][]string{
+			"type": {"container"},
+			"container": {c.Id},
+			"event": {"health_status", "stop", "kill", "die", "oom"},
+		},
+	}
+
+	if err = client.AddEventListenerWithOptions(eventsOptions, listener); err != nil {
+		return nil, err
+	}
+
+	return &Monitor{
+		context: c,
+		client: client,
+		listener: listener,
+	}, nil
 }
 
 func pidFile(c *Context) error {
@@ -508,14 +610,15 @@ func keepAlive(c *Context) error {
 		}
 
 		/* Good old polling... */
+		containerOptions := dockerClient.InspectContainerOptions{ID: c.Id}
 		for true {
-			container, err := client.InspectContainer(c.Id)
+			container, err := client.InspectContainerWithOptions(containerOptions)
 			if err != nil {
 				return err
 			}
 
 			if container.State.Running {
-				client.WaitContainer(c.Id)
+				_, _ = client.WaitContainer(c.Id)
 			} else {
 				return nil
 			}
@@ -567,7 +670,9 @@ func mainWithArgs(args []string) (*Context, error) {
 		return c, err
 	}
 
-	go pipeLogs(c)
+	go func() {
+		_ = pipeLogs(c)
+	}()
 
 	err = keepAlive(c)
 	if err != nil {

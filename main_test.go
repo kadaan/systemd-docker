@@ -1,6 +1,7 @@
 package main
 
 import (
+	dockerClient "github.com/fsouza/go-dockerclient"
 	"io/ioutil"
 	"log"
 	"os"
@@ -9,13 +10,7 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
-
-	dockerClient "github.com/fsouza/go-dockerclient"
 )
-
-func init() {
-	INTERVAL = 100
-}
 
 func TestParseNoRun(t *testing.T) {
 	_, err := parseContext([]string{"a", "b", "-d"})
@@ -192,6 +187,7 @@ func TestParseRmSet(t *testing.T) {
 
 func TestBadExec(t *testing.T) {
 	c := &Context{
+		Action: "run",
 		Args: []string{"-bad"},
 	}
 
@@ -215,6 +211,7 @@ func TestBadExec(t *testing.T) {
 
 func TestGoodExec(t *testing.T) {
 	c := &Context{
+		Action: "run",
 		Args: []string{"-d", "busybox", "ping", "-c10", "localhost"},
 	}
 
@@ -241,7 +238,7 @@ func TestParseCgroups(t *testing.T) {
 	}
 
 	if val, ok := cgroups["blkio"]; ok {
-		p := path.Join(SYSFS, "blkio", val)
+		p := path.Join(SysFsCgroupPath, "blkio", val)
 		if _, err := os.Stat(p); os.IsNotExist(err) {
 			log.Fatalf("Path does not exist %s err %d", p, err)
 		}
@@ -252,6 +249,7 @@ func TestParseCgroups(t *testing.T) {
 
 func TestMoveCgroup(t *testing.T) {
 	c := &Context{
+		Action: "run",
 		Args: []string{"-d", "busybox", "ping", "-c10", "localhost"},
 	}
 
@@ -287,7 +285,7 @@ func TestRemoveNoLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = client.InspectContainer(c.Id)
+	_, err = client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: c.Id})
 	if _, ok := err.(*dockerClient.NoSuchContainer); !ok {
 		t.Fatal("Should have failed")
 	}
@@ -304,7 +302,7 @@ func TestRemoveWithLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = client.InspectContainer(c.Id)
+	_, err = client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: c.Id})
 	if _, ok := err.(*dockerClient.NoSuchContainer); !ok {
 		t.Fatal("Should have failed")
 	}
@@ -316,7 +314,7 @@ func deleteTestContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	container, err := client.InspectContainer("systemd-docker-test")
+	container, err := client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: "systemd-docker-test"})
 	if err == nil {
 		log.Println("Deleting existing container", container.ID)
 		err = client.RemoveContainer(dockerClient.RemoveContainerOptions{
@@ -343,7 +341,7 @@ func TestNamedContainerNoRm(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	container, err := client.InspectContainer("systemd-docker-test")
+	container, err := client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: "systemd-docker-test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +355,7 @@ func TestNamedContainerNoRm(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	container2, err := client.InspectContainer(c.Id)
+	container2, err := client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: c.Id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +388,7 @@ func TestNamedContainerRmPrevious(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	container, err := client.InspectContainer("systemd-docker-test")
+	container, err := client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: "systemd-docker-test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +402,7 @@ func TestNamedContainerRmPrevious(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = client.InspectContainer(c.Id)
+	_, err = client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: c.Id})
 	if err == nil {
 		t.Fatal("Should not exists")
 	}
@@ -429,7 +427,7 @@ func TestNamedContainerAttach(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	container, err := client.InspectContainer("systemd-docker-test")
+	container, err := client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: "systemd-docker-test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +441,7 @@ func TestNamedContainerAttach(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	container2, err := client.InspectContainer(c.Id)
+	container2, err := client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: c.Id})
 	if err != nil {
 		t.Fatal("Should exists", err)
 	}
@@ -459,11 +457,6 @@ func TestNamedContainerAttach(t *testing.T) {
 	deleteTestContainer(t)
 }
 
-func Exist(path string) bool {
-	_, err := os.Stat(path)
-	return os.IsExist(err)
-}
-
 func TestPidFile(t *testing.T) {
 	client, err := getClient(&Context{})
 	if err != nil {
@@ -472,14 +465,14 @@ func TestPidFile(t *testing.T) {
 
 	pidFileName := "./pid-file"
 
-	os.Remove(pidFileName)
+	_ = os.Remove(pidFileName)
 
 	c, err := mainWithArgs([]string{"--logs=false", "--pid-file", "./pid-file", "run", "--rm", "busybox", "echo", "hi"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = client.InspectContainer(c.Id)
+	_, err = client.InspectContainerWithOptions(dockerClient.InspectContainerOptions{ID: c.Id})
 	if err == nil {
 		t.Fatal("Container should not exist")
 	}
@@ -493,5 +486,5 @@ func TestPidFile(t *testing.T) {
 		t.Fatal("Failed to write pid file")
 	}
 
-	os.Remove(pidFileName)
+	_ = os.Remove(pidFileName)
 }
