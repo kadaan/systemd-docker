@@ -44,22 +44,24 @@ type Context struct {
 }
 
 type monitor interface {
-	Close() error
-	Start(conn net.Conn) error
+	close() error
+	start(conn net.Conn) error
 }
 
 type Monitor struct {
-	context	 *Context
-	client   *dockerClient.Client
-	listener chan *dockerClient.APIEvents
+	context               *Context
+	client                *dockerClient.Client
+	listener              chan *dockerClient.APIEvents
+	healthCheckCommand    string
 }
 
-func (m *Monitor) Start(conn net.Conn) error {
+func (m *Monitor) start(conn net.Conn) error {
 	log.Printf("Starting health check monitor for container %s\n", m.context.Id)
 	defer func(conn net.Conn) {
 		_ = conn.Close()
 	}(conn)
 	ready := false
+	lastHealthCheckCommandExecuteId := ""
 	for {
 		select {
 		case ev, ok := <-m.listener:
@@ -67,31 +69,53 @@ func (m *Monitor) Start(conn net.Conn) error {
 				return errors.New("event listener closed")
 			}
 			if strings.HasPrefix(ev.Action, "health_status: ") {
-				if ev.Status == "health_status: healthy" {
-					if !ready {
-						if _, err := conn.Write([]byte("READY=1")); err == nil {
-							log.Printf("Signaled to systemd that the container %s is healthy\n", m.context.Id)
-							ready = true
-						} else {
-							fmt.Printf("Failed to signal to systemd that the container %s is healthy: %s\n", m.context.Id, err)
-						}
-					} else {
-						if _, err := conn.Write([]byte("WATCHDOG=1")); err == nil {
-							log.Printf("Signaled to systemd watchdog that the container %s is still healthy\n", m.context.Id)
-						} else {
-							fmt.Printf("Failed to signal to systemd watchdog that the container %s is still healthy: %s\n", m.context.Id, err)
-						}
-					}
+				if ev.Action == "health_status: healthy" {
+					ready = m.notify(conn, ready)
 				}
 			} else if ev.Action == "stop" || ev.Action == "kill" || ev.Action == "die" || ev.Action == "oom" {
 				log.Printf("Container %s is exiting, stopping health check monitor\n", m.context.Id)
 				return nil
+			} else if strings.HasPrefix(ev.Action, "exec_start: ") {
+				if strings.HasSuffix(ev.Action, m.healthCheckCommand) {
+					lastHealthCheckCommandExecuteId = ev.Actor.Attributes["execID"]
+					log.Printf("Container %s health check %s started\n", m.context.Id, lastHealthCheckCommandExecuteId)
+				} else {
+					log.Printf("Container %s exec command %s started.  Not health check, skipping\n", m.context.Id, ev.Actor.Attributes["execID"])
+				}
+			} else if ev.Action == "exec_die" {
+				if ev.Actor.Attributes["execID"] == lastHealthCheckCommandExecuteId {
+					if ev.Actor.Attributes["exitCode"] == "0" {
+						ready = m.notify(conn, ready)
+					} else {
+						log.Printf("Container %s health check %s failed with exitCode %s.  Skipping notify.\n", m.context.Id, lastHealthCheckCommandExecuteId, ev.Actor.Attributes["exitCode"])
+					}
+				} else {
+					log.Printf("Container %s exec command %s finished with exitCode %s.  Not health check, skipping\n", m.context.Id, ev.Actor.Attributes["execID"], ev.Actor.Attributes["exitCode"])
+				}
 			}
 		}
 	}
 }
 
-func (m *Monitor) Close() error {
+func (m *Monitor) notify(conn net.Conn, ready bool) bool {
+	if !ready {
+		if _, err := conn.Write([]byte("READY=1")); err == nil {
+			log.Printf("Signaled to systemd that the container %s is healthy\n", m.context.Id)
+		} else {
+			fmt.Printf("Failed to signal to systemd that the container %s is healthy: %s\n", m.context.Id, err)
+			return false
+		}
+	} else {
+		if _, err := conn.Write([]byte("WATCHDOG=1")); err == nil {
+			log.Printf("Signaled to systemd watchdog that the container %s is still healthy\n", m.context.Id)
+		} else {
+			fmt.Printf("Failed to signal to systemd watchdog that the container %s is still healthy: %s\n", m.context.Id, err)
+		}
+	}
+	return true
+}
+
+func (m *Monitor) close() error {
 	log.Printf("Closing health check monitor for container %s\n", m.context.Id)
 	if err := m.client.RemoveEventListener(m.listener); err != nil {
 		return err
@@ -519,12 +543,23 @@ func notify(c *Context) error {
 		if err != nil {
 			return err
 		}
-		go func(m monitor) {
-			defer func(m monitor) {
-				_ = m.Close()
+		if m == nil {
+			defer func(conn net.Conn) {
+				_ = conn.Close()
+			}(conn)
+
+			_, err = conn.Write([]byte("READY=1"))
+			if err != nil {
+				return err
+			}
+		} else {
+			go func(m monitor) {
+				defer func(m monitor) {
+					_ = m.close()
+				}(m)
+				_ = m.start(conn)
 			}(m)
-			_ = m.Start(conn)
-		}(m)
+		}
 	} else {
 		defer func(conn net.Conn) {
 			_ = conn.Close()
@@ -540,19 +575,38 @@ func notify(c *Context) error {
 }
 
 func createMonitor(c *Context) (monitor, error) {
-	log.Printf("Creating health check monitor for container %s\n", c.Id)
-
 	client, err := getClient(c)
 	if err != nil {
 		return nil, err
 	}
+
+	containerOptions := dockerClient.InspectContainerOptions{ID: c.Id}
+	container, err := client.InspectContainerWithOptions(containerOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	if container.Config.Healthcheck == nil || container.Config.Healthcheck.Test == nil || len(container.Config.Healthcheck.Test) == 0 {
+		log.Printf("Container %s does not have health check, skipping monitor creation\n", c.Id)
+		return nil, nil
+	}
+
+	var healthCheckTests []string
+	for i := range container.Config.Healthcheck.Test {
+		if i > 0 || (i == 0 && container.Config.Healthcheck.Test[i] != "CMD" && container.Config.Healthcheck.Test[i] != "CMD-SHELL") {
+			healthCheckTests = append(healthCheckTests, container.Config.Healthcheck.Test[i])
+		}
+	}
+
+	healthCheckCommand := strings.Join(healthCheckTests, " ")
+	log.Printf("Creating health check monitor for container %s, watching health check: %s\n", c.Id, healthCheckCommand)
 
 	listener := make(chan *dockerClient.APIEvents)
 	eventsOptions := dockerClient.EventsOptions{
 		Filters: map[string][]string{
 			"type": {"container"},
 			"container": {c.Id},
-			"event": {"health_status", "stop", "kill", "die", "oom"},
+			"event": {"health_status", "exec_start", "exec_die", "stop", "kill", "die", "oom"},
 		},
 	}
 
@@ -564,6 +618,7 @@ func createMonitor(c *Context) (monitor, error) {
 		context: c,
 		client: client,
 		listener: listener,
+		healthCheckCommand: healthCheckCommand,
 	}, nil
 }
 
