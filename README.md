@@ -20,7 +20,9 @@ It's written in Golang and allows to *leverage all the cgroup functionality of `
 - the code was written by [@ibuildthecloud](https://github.com/ibuildthecloud) and his co-contributors in this [repository](https://github.com/ibuildthecloud/systemd-docker). 
 The motivation is explained in this [Docker issue #6791](https://github.com/docker/docker/issues/6791) and this [mailing list thread](https://groups.google.com/d/topic/coreos-dev/wf7G6rA7Bf4/discussion).
 - [@agend07](https://github.com/agend07) and co-contributors fixed outdated dependancies and did a first clean-up
-- I removed all outdated and broken elements and created a new compilation docker container which can be found [here]()
+- [@embtom](https://github.com/embtom/systemd-docker) removed all outdated and broken elements and created a new compilation docker container
+- various develops have contributed numerous improvements
+- I have refactored the project into smaller files and added health check to sd_notify integration 
 
 # Installation
 Supposing that a Go environment is available, the build instruction is `go get github.com/DonTseTse/systemd-docker`. The 
@@ -38,7 +40,7 @@ can be used and everything should stay in sync.
 
 In the `systemd` unit files, the instruction to launch the Docker container takes the form 
 
-`ExecStart=/path/to/systemd-docker [<systemd-docker_options>] run <docker-run_parameters>`
+`ExecStart=/path/to/systemd-docker [<systemd-docker_options>] -- <docker-run_parameters>`
 
 where
 - `/path/to/systemd-docker` is the absolute path of the `systemd-docker` executable
@@ -59,7 +61,7 @@ Requires=docker.service
 Type=notify
 NotifyAccess=all
 #------------------------
-ExecStart=/usr/bin/systemd-docker run --rm --name %n nginx
+ExecStart=/usr/bin/systemd-docker -- --rm --name %n nginx
 Restart=always
 RestartSec=10s
 TimeoutStartSec=120
@@ -83,21 +85,21 @@ While it may seem as if that could be omitted as long as the `--rm` flag is used
 container, that's misleading: the deletion process triggered by this flag is actually part of the Docker client logic and 
 if the client detaches for whatever reason from the running container, the information is lost (even if another client is
 re-attached later) and *the container will **not** be deleted* upon termination. `systemd-docker` adds an additional check 
-and looks for the named container when `systemd-docker ... run ...` is called - if a stopped container exists, it's removed.
+and looks for the named container when `systemd-docker ... -- ...` is called - if a stopped container exists, it's removed.
 
 # Systemd integration details
 ## Automatic container naming
 While it processes unit files, `systemd` populates a range of variables among which `%n` stands for the name of service, 
 derived from it's filename. This  allows to write a self-configuring `ExecStart` instruction using the parameters
  
-`ExecStart=/path/to/systemd-docker ... run ... --name %n --rm ...`
+`ExecStart=/path/to/systemd-docker ... -- ... --name %n --rm ...`
 
 ## Use of systemd environment variables
 `systemd` handles environment variables with the instructions `Environment=...` and `EnvironmentFile=...`. To inject
 variables into other instructions, the pattern is *${variable_name}*. With the `docker run` flag `-e` they can be passed 
 from `systemd` to the Docker container
 
-Example: `ExecStart=/path/to/systemd-docker ... run -e ABC=${ABC} -e XYZ=${XYZ} ...`
+Example: `ExecStart=/path/to/systemd-docker ... -- -e ABC=${ABC} -e XYZ=${XYZ} ...`
 
 `systemd-docker` has an option to pass on all defined environment variables using the `--env` flag, explained 
 [here](#environment-variables)
@@ -126,7 +128,7 @@ transfered using a `--cgroups` flags for each cgroup to transfer. **`-cgroups na
 `systemd` supervise the container**.
 This implies that the `docker run` flags  `--cpuset` and/or `-m` are incompatible.
 
-Example: `ExecStart=/path/to/systemd-docker ... --cgroups name=systemd --cgroups=cpu ... run ...`
+Example: `ExecStart=/path/to/systemd-docker ... --cgroups name=systemd --cgroups=cpu ... -- ...`
 
 The above command will use the `name=systemd` and `cpu` cgroups of systemd but then use Docker's cgroups for all the 
 others, like the freezer cgroup.
@@ -134,7 +136,7 @@ others, like the freezer cgroup.
 ## Logging
 By default the container's stdout/stderr is written to the system journal. This may be disabled with `--logs=false`.
 
-Example: `ExecStart=/path/to/systemd-docker ... --logs=false ... run ...`
+Example: `ExecStart=/path/to/systemd-docker ... --logs=false ... -- ...`
 
 ## Environment Variables
 The `systemd` environment variables are automatically passed through to the Docker container if the `--env` flag is set.  
@@ -143,28 +145,40 @@ It will essentially read all the current environment variables and add the appro
 
 ```
 EnvironmentFile=/etc/environment
-ExecStart=systemd-docker ... --env ... run ...
+ExecStart=systemd-docker ... --env ... -- ...
 ```
 In the example above, all environment variables defined in `/etc/environment` will be passed to the `docker run` command.
 
 ## PID File
 To create a PID file for the container, use the flag `--pid-file=</path/to/pid_file>`.
 
-Example: `ExecStart=/path/to/systemd-docker ... --pid-file=/var/run/%n.pid ... run ...`
+Example: `ExecStart=/path/to/systemd-docker ... --pid-file=/var/run/%n.pid ... -- ...`
 
 ## systemd-notify support
 
-The `systemd-docker` flag `--notify` makes `systemd-docker` delegate the `systemd-notify` `READY=1` call to the container 
+By default `systemd-docker` will inspect the container for a health check and will use the health check results to 
+determine when to send `systemd-notify READY=1` and `systemd-notify WATCHDOG=1`.
+
+The `systemd-docker` flag `--notify` makes `systemd-docker` delegate the `systemd-notify READY=1` call to the container 
 itself. To allow the container to achieve this, `systemd-docker` bind mounts the `systemd` notification socket into the 
 container and sets the NOTIFY_SOCKET environment variable. 
 
-Example: `ExecStart=/path/to/systemd-docker ... --notify ... run ...`
+Example: `ExecStart=/path/to/systemd-docker ... --notify ... -- ...`
 
 ## Container removal behavior
 
 To disable `systemd-docker`'s "remove stopped container" procedure, the flag `... --rm=false ...` can be used.
 
-Example: `ExecStart=/path/to/systemd-docker ... --rm=false ... run ...`
+Example: `ExecStart=/path/to/systemd-docker ... --rm=false ... -- ...`
+
+## Additional networks
+
+`systemd-docker` can join the container to additional networks when the container is started by including the `... --networks=<NETWORK> ... flag.
+
+Example 1: `ExecStart=/path/to/systemd-docker ... --networks=network_name ... -- ...`
+Example 2: `ExecStart=/path/to/systemd-docker ... --networks=network_name:192.168.1.123 ... -- ...`
+Example 3: `ExecStart=/path/to/systemd-docker ... --networks=network_name,other_network_name ... -- ...`
+Example 4: `ExecStart=/path/to/systemd-docker ... --networks=network_name:192.168.1.123,other_network_name:192.168.2.123 ... -- ...`
 
 # Docker restrictions
 ## --cpuset and/or -m
@@ -181,7 +195,7 @@ CentOS 7 is inconsistent in the way it handles some cgroups. It has `3:cpuacct,c
 `/sys/fs/cgroup/cpu,cpuacct/` doesn't exist. This causes `systemd-docker` to fail when it tries to move the PIDs there. To solve this the `name=systemd`
 cgroup must be explicitely mentioned: 
 
-`/path/to/systemd-docker ... --cgroups name=systemd ... run ...`
+`/path/to/systemd-docker ... --cgroups name=systemd ... -- ...`
 
 See https://github.com/ibuildthecloud/systemd-docker/issues/15 for details.
 
