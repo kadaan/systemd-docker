@@ -175,10 +175,12 @@ Example: `ExecStart=/path/to/systemd-docker ... --rm=false ... -- ...`
 
 `systemd-docker` can join the container to additional networks when the container is started by including the `... --networks=<NETWORK> ... flag.
 
-Example 1: `ExecStart=/path/to/systemd-docker ... --networks=network_name ... -- ...`
-Example 2: `ExecStart=/path/to/systemd-docker ... --networks=network_name:192.168.1.123 ... -- ...`
-Example 3: `ExecStart=/path/to/systemd-docker ... --networks=network_name,other_network_name ... -- ...`
-Example 4: `ExecStart=/path/to/systemd-docker ... --networks=network_name:192.168.1.123,other_network_name:192.168.2.123 ... -- ...`
+Examples:
+
+1. `ExecStart=/path/to/systemd-docker ... --networks=network_name ... -- ...`
+2. `ExecStart=/path/to/systemd-docker ... --networks=network_name:192.168.1.123 ... -- ...`
+3. `ExecStart=/path/to/systemd-docker ... --networks=network_name,other_network_name ... -- ...`
+4. `ExecStart=/path/to/systemd-docker ... --networks=network_name:192.168.1.123,other_network_name:192.168.2.123 ... -- ...`
 
 # Docker restrictions
 ## --cpuset and/or -m
