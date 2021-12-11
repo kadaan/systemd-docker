@@ -4,13 +4,18 @@ go 1.17
 
 replace github.com/Sirupsen/logrus => github.com/sirupsen/logrus v1.8.1
 
-require github.com/fsouza/go-dockerclient v1.7.2
+require (
+	github.com/fsouza/go-dockerclient v1.7.2
+	github.com/opencontainers/runc v1.0.1
+)
 
 require (
 	github.com/Azure/go-ansiterm v0.0.0-20170929234023-d6e3b3328b78 // indirect
-	github.com/docker/docker v20.10.3-0.20210804232411-deda3d4933d3+incompatible // indirect
+	github.com/coreos/go-systemd/v22 v22.3.2 // indirect
+	github.com/cyphar/filepath-securejoin v0.2.2 // indirect
 	github.com/docker/go-connections v0.4.0 // indirect
 	github.com/docker/go-units v0.4.0 // indirect
+	github.com/godbus/dbus/v5 v5.0.4 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/moby/sys/mount v0.2.0 // indirect
@@ -19,9 +24,13 @@ require (
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.0.1 // indirect
-	github.com/opencontainers/runc v1.0.1 // indirect
-	github.com/sirupsen/logrus v1.8.1 // indirect
+	github.com/opencontainers/runtime-spec v1.0.3-0.20210326190908-1c3f411f0417 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
+)
+
+require (
+	github.com/docker/docker v20.10.3-0.20210804232411-deda3d4933d3+incompatible // indirect
+	github.com/sirupsen/logrus v1.8.1
 )
 
 require (

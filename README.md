@@ -19,7 +19,8 @@ It's written in Golang and allows to *leverage all the cgroup functionality of `
 # Repository history and credits
 - the code was written by [@ibuildthecloud](https://github.com/ibuildthecloud) and his co-contributors in this [repository](https://github.com/ibuildthecloud/systemd-docker). 
 The motivation is explained in this [Docker issue #6791](https://github.com/docker/docker/issues/6791) and this [mailing list thread](https://groups.google.com/d/topic/coreos-dev/wf7G6rA7Bf4/discussion).
-- [@agend07](https://github.com/agend07) and co-contributors fixed outdated dependancies and did a first clean-up
+- [@agend07](https://github.com/agend07/systemd-docker) and co-contributors fixed outdated dependancies and did a first clean-up
+- [@dontsetse](https://github.com/dontsetse/systemd-docker) made a bunch of improvements in 2018
 - [@embtom](https://github.com/embtom/systemd-docker) removed all outdated and broken elements and created a new compilation docker container
 - various develops have contributed numerous improvements
 - I have refactored the project into smaller files and added health check to sd_notify integration 
@@ -114,25 +115,21 @@ available in unit files:
 - `NotifyAccess=all`: "Controls access to the service status notification socket, as accessible via the sd_notify(3) call. ...
   If all, all services updates from all members of the service's control group are accepted."
 
-By default `systemd-docker` will send READY=1 to the `systemd` notification socket but it can also be configured to delegate 
-this to the container as explained [here](#systemd-notify-support).
+By default `systemd-docker` do either:
+1. If a health check in enabled, `systemd-docker` monitor the results and send READY=1 to the `systemd` notification 
+socket once the service is healthy.  `systemd-docker` will also send WATCHDOG=1 to the `systemd` notification socket 
+for every health check success.
+2. Send READY=1 to the `systemd` notification socket.
+
+Alternatively, notifying systemd can be delegated to the container.
+ 
+See [systemd-notify support](#systemd-notify-support) for more details.
 
 Please be aware that `systemd-notify` comes with its own quirks - more info can be found in this
-[mailing list thread](http://comments.gmane.org/gmane.comp.sysutils.systemd.devel/18649).  In short, `systemd-notify` is not reliable because often
-the child dies before `systemd` has time to determine which cgroup it is a member of.
+[mailing list thread](http://comments.gmane.org/gmane.comp.sysutils.systemd.devel/18649).  In short, `systemd-notify` 
+is not reliable because often the child dies before `systemd` has time to determine which cgroup it is a member of.
 
 # Systemd-docker options
-## Cgroups
-By default all application cgroups are moved to systemd. It's also possible to control individually which cgroups are 
-transfered using a `--cgroups` flags for each cgroup to transfer. **`-cgroups name=systemd` is the strict minimum to have  
-`systemd` supervise the container**.
-This implies that the `docker run` flags  `--cpuset` and/or `-m` are incompatible.
-
-Example: `ExecStart=/path/to/systemd-docker ... --cgroups name=systemd --cgroups=cpu ... -- ...`
-
-The above command will use the `name=systemd` and `cpu` cgroups of systemd but then use Docker's cgroups for all the 
-others, like the freezer cgroup.
-
 ## Logging
 By default the container's stdout/stderr is written to the system journal. This may be disabled with `--logs=false`.
 
@@ -157,7 +154,8 @@ Example: `ExecStart=/path/to/systemd-docker ... --pid-file=/var/run/%n.pid ... -
 ## systemd-notify support
 
 By default `systemd-docker` will inspect the container for a health check and will use the health check results to 
-determine when to send `systemd-notify READY=1` and `systemd-notify WATCHDOG=1`.
+determine when to send `systemd-notify READY=1` and `systemd-notify WATCHDOG=1`.  If there is no health check, then 
+`systemd-docker` will send `systemd-notify READY=1` once the container has started.
 
 The `systemd-docker` flag `--notify` makes `systemd-docker` delegate the `systemd-notify READY=1` call to the container 
 itself. To allow the container to achieve this, `systemd-docker` bind mounts the `systemd` notification socket into the 
@@ -173,7 +171,8 @@ Example: `ExecStart=/path/to/systemd-docker ... --rm=false ... -- ...`
 
 ## Additional networks
 
-`systemd-docker` can join the container to additional networks when the container is started by including the `... --networks=<NETWORK> ... flag.
+`systemd-docker` can join the container to additional networks when the container is started by including 
+the `... --networks=<NETWORK> ... flag.
 
 Examples:
 
@@ -187,21 +186,13 @@ Examples:
 These flags can't be used because they are incompatible with the cgroup migration(s) inherent to `systemd-docker`. 
 
 ## -d (detaching the Docker client)
-The `-d` flag provided to `docker run` has no effect under `systemd-docker`. To cause the Docker client to detach after the container is running, use 
-the `systemd-docker` options `--logs=false --rm=false`. If either `--logs` or `--rm` is true, the Docker client instance used by `systemd-docker` is kept 
-alive until the `systemd` service is stopped or the container exits.
+The `-d` flag provided to `docker run` has no effect under `systemd-docker`. To cause the Docker client to detach after 
+the container is running, use the `systemd-docker` options `--rm=false`. If `--rm` is true, the Docker client instance 
+used by `systemd-docker` is kept alive until the `systemd` service is stopped or the container exits.
 
-# Known issues
-## Inconsistent cgroup
-CentOS 7 is inconsistent in the way it handles some cgroups. It has `3:cpuacct,cpu:/user.slice` in `/proc/[pid]/cgroups` but the corresponding path 
-`/sys/fs/cgroup/cpu,cpuacct/` doesn't exist. This causes `systemd-docker` to fail when it tries to move the PIDs there. To solve this the `name=systemd`
-cgroup must be explicitely mentioned: 
-
-`/path/to/systemd-docker ... --cgroups name=systemd ... -- ...`
-
-See https://github.com/ibuildthecloud/systemd-docker/issues/15 for details.
 
 # License
-See [repository history and credits](#repository-history-and-credits) for acknowledgments. The work on this repository was done in 2018 by DonTseTse. 
+See [repository history and credits](#repository-history-and-credits) for acknowledgments. The work on this repository 
+was done in 2021 by kadaan. 
 
 Licensed under the [Apache License, Version 2.0](LICENSE)

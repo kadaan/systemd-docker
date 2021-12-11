@@ -1,149 +1,101 @@
+// Copyright © 2021 Joel Baranick <jbaranick@gmail.com>
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at:
+//
+// 	  http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package lib
 
 import (
 	"bufio"
 	"fmt"
-	"io/ioutil"
+	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"os"
-	"path"
-	"strconv"
+	"path/filepath"
 	"strings"
 )
 
-var (
-	CgroupProcs     = "cgroup.procs"
-	SysFsCgroupPath = "/sys/fs/cgroup"
-	ProcCgroupPath  = "/proc/%d/cgroup"
-)
-
-func getCgroupsForPid(pid int) (map[string]string, error) {
-	file, err := os.Open(fmt.Sprintf(ProcCgroupPath, pid))
+func MoveCgroups(c *Context) error {
+	procFile := "/proc/self/cgroup"
+	f, err := os.Open(procFile)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	defer func(f *os.File) {
+		_ = f.Close()
+	}(f)
 
-	ret := map[string]string{}
+	unifiedMode := cgroups.IsCgroup2UnifiedMode()
 
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := strings.SplitN(scanner.Text(), ":", 3)
-		if len(line) != 3 || line[1] == "" {
-			continue
-		}
-
-		// For cgroups like "cpu,cpuacct" the ordering isn't guaranteed to be
-		// the same as the /sys/fs/cgroup dentry. But the kernel provides symlinks
-		// for each of the comma-separated components.
-		for _, part := range strings.Split(line[1], ",") {
-			ret[part] = line[2]
+		line := scanner.Text()
+		if err = moveCgroup(c, line, unifiedMode); err != nil {
+			return err
 		}
 	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	return ret, nil
+	return nil
 }
 
-func getCgroupPids(c *Context, cgroupName string, cgroupPath string) ([]string, error) {
-	var ret []string
+func moveCgroup(c *Context, line string, unifiedMode bool) error {
+	parts := strings.SplitN(line, ":", 3)
+	if len(parts) != 3 {
+		return fmt.Errorf("cannot parse cgroup line %q", line)
+	}
 
-	file, err := os.Open(constructCgroupPath(c, cgroupName, cgroupPath))
+	// root cgroup, skip it
+	if parts[2] == "/" {
+		return nil
+	}
+
+	cgroupRoot := "/sys/fs/cgroup"
+	// Special case the unified mount on hybrid cgroup and named hierarchies.
+	// This works on Fedora 31, but we should really parse the mounts to see
+	// where the cgroup hierarchy is mounted.
+	if parts[1] == "" && !unifiedMode {
+		// If it is not using unified mode, the cgroup v2 hierarchy is
+		// usually mounted under /sys/fs/cgroup/unified
+		cgroupRoot = filepath.Join(cgroupRoot, "unified")
+
+		// Ignore the unified mount if it doesn't exist
+		if _, err := os.Stat(cgroupRoot); err != nil && os.IsNotExist(err) {
+			//continue
+		}
+	} else if parts[1] != "" {
+		// Assume the controller is mounted at /sys/fs/cgroup/$CONTROLLER.
+		controller := strings.TrimPrefix(parts[1], "name=")
+		cgroupRoot = filepath.Join(cgroupRoot, controller)
+	}
+
+	newCgroup := filepath.Join(cgroupRoot, parts[2])
+	if err := os.MkdirAll(newCgroup, 0755); err != nil && !os.IsExist(err) {
+		return err
+	}
+
+	f, err := os.OpenFile(filepath.Join(newCgroup, "cgroup.procs"), os.O_RDWR, 0755)
 	if err != nil {
-		return nil, err
+		return err
+	}
+	defer func(f *os.File) {
+		_ = f.Close()
+	}(f)
+
+	if HasPidDied(c.Pid) {
+		return nil
 	}
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		ret = append(ret, strings.TrimSpace(scanner.Text()))
+	c.Log.Infof("Moving process %d to cgroup %s\n", c.Pid, newCgroup)
+	if _, err := f.Write([]byte(fmt.Sprintf("%d\n", c.Pid))); err != nil {
+		return fmt.Errorf("Cannot move process %d to cgroup %q: %v\n", c.Pid, newCgroup, err)
 	}
-
-	if err = scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	return ret, nil
-}
-
-func constructCgroupPath(c *Context, cgroupName string, cgroupPath string) string {
-	if cgroupName == "" && c.UnifiedHiearchy {
-		cgroupName = "unified"
-	}
-	return path.Join(SysFsCgroupPath, strings.TrimPrefix(cgroupName, "name="), cgroupPath, CgroupProcs)
-}
-
-func writePid(pid string, path string) error {
-	return ioutil.WriteFile(path, []byte(pid), 0644)
-}
-
-func MoveCgroups(c *Context) (bool, error) {
-	moved := false
-	currentCgroups, err := getCgroupsForPid(os.Getpid())
-	if err != nil {
-		return false, err
-	}
-
-	containerCgroups, err := getCgroupsForPid(c.Pid)
-	if err != nil {
-		return false, err
-	}
-
-	var ns []string
-
-	if c.AllCgroups || c.Cgroups == nil || len(c.Cgroups) == 0 {
-		ns = make([]string, 0, len(containerCgroups))
-		for value := range containerCgroups {
-			ns = append(ns, value)
-		}
-	} else {
-		ns = c.Cgroups
-	}
-
-	for _, nsName := range ns {
-		currentPath, ok := currentCgroups[nsName]
-		if !ok {
-			continue
-		}
-
-		containerPath, ok := containerCgroups[nsName]
-		if !ok {
-			continue
-		}
-
-		if currentPath == containerPath || containerPath == "/" {
-			continue
-		}
-
-		pids, err := getCgroupPids(c, nsName, containerPath)
-		if err != nil {
-			return false, err
-		}
-
-		for _, pid := range pids {
-			pidInt, err := strconv.Atoi(pid)
-			if err != nil {
-				continue
-			}
-
-			if HasPidDied(pidInt) {
-				continue
-			}
-
-			currentFullPath := constructCgroupPath(c, nsName, currentPath)
-			c.Log.Infof("Moving pid %s to %s\n", pid, currentFullPath)
-			err = writePid(pid, currentFullPath)
-			if err != nil {
-				if HasPidDied(pidInt) {
-					// Ignore if PID died between previous check and cgroup assignment
-					continue
-				}
-				return false, err
-			}
-
-			moved = true
-		}
-	}
-
-	return moved, nil
+	return nil
 }
