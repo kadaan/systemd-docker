@@ -22,7 +22,7 @@ The motivation is explained in this [Docker issue #6791](https://github.com/dock
 - [@agend07](https://github.com/agend07/systemd-docker) and co-contributors fixed outdated dependancies and did a first clean-up
 - [@dontsetse](https://github.com/dontsetse/systemd-docker) made a bunch of improvements in 2018
 - [@embtom](https://github.com/embtom/systemd-docker) removed all outdated and broken elements and created a new compilation docker container
-- various develops have contributed numerous improvements
+- various developers have contributed numerous improvements
 - I have refactored the project into smaller files and added health check to sd_notify integration 
 
 # Installation
