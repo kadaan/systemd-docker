@@ -190,7 +190,6 @@ The `-d` flag provided to `docker run` has no effect under `systemd-docker`. To 
 the container is running, use the `systemd-docker` options `--rm=false`. If `--rm` is true, the Docker client instance 
 used by `systemd-docker` is kept alive until the `systemd` service is stopped or the container exits.
 
-
 # License
 See [repository history and credits](#repository-history-and-credits) for acknowledgments. The work on this repository 
 was done in 2021 by kadaan. 
